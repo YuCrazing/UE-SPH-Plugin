@@ -1,0 +1,1217 @@
+#include "/Engine/Public/Platform.ush"
+
+#define PI 3.14159265359
+#define EPS 1e-6
+float rand_1_05(in float2 uv)
+{
+    float2 noise = (frac(sin(dot(uv, float2(12.9898, 78.233) * 2.0)) * 43758.5453));
+    return abs(noise.x + noise.y) * 0.5;
+}
+
+float2 rand_2_10(in float2 uv)
+{
+    float noiseX = (frac(sin(dot(uv, float2(12.9898, 78.233) * 2.0)) * 43758.5453));
+    float noiseY = sqrt(1 - noiseX * noiseX);
+    return float2(noiseX, noiseY);
+}
+
+float2 rand_2_0004(in float2 uv)
+{
+    float noiseX = (frac(sin(dot(uv, float2(12.9898, 78.233))) * 43758.5453));
+    float noiseY = (frac(sin(dot(uv, float2(12.9898, 78.233) * 2.0)) * 43758.5453));
+    return float2(noiseX, noiseY) * 0.004;
+}
+
+float W_poly6(float3 R, float h)
+{
+    float r = length(R);
+    if (r <= h)
+    {
+        float h2 = h * h;
+        float h4 = h2 * h2;
+        float h9 = h4 * h4 * h;
+        float h2_r2 = (h2 - r * r);
+        return 315.0 / (64 * PI * h9) * h2_r2 * h2_r2 * h2_r2;
+    }
+    else
+    {
+        return 0;
+    }
+}
+
+float3 W_poly6_gradient(float R, float h)
+{
+    float r = length(R);
+    if (r <= h)
+    {
+        float h2 = h * h;
+        float h4 = h2 * h2;
+        float h9 = h4 * h4 * h;
+        float h2_r2 = (h2 - r * r);
+        return - 945.0 / (32 * PI * h9) * h2_r2 * h2_r2 * R;
+    }
+    else
+    {
+        return 0;
+    }
+}
+
+float3 W_poly6_laplacian(float R, float h)
+{
+    float r = length(R);
+    if (r <= h)
+    {
+        float h2 = h * h;
+        float h4 = h2 * h2;
+        float h9 = h4 * h4 * h;
+        float r2 = r * r;
+        float h2_r2 = (h2 - r2);
+        return 945.0 / (8 * PI * h9) * h2_r2 * (r2 - 3.0 / 4 * h2_r2);
+    }
+    else
+    {
+        return 0;
+    }
+}
+
+float W_spiky(float3 R, float h)
+{
+    float r = length(R);
+    if (r <= h)
+    {
+        float h3 = h * h * h;
+        float h6 = h3 * h3;
+        float h_r = (h - r);
+        return 15.0 / (PI * h6) * h_r * h_r * h_r;
+    }
+    else
+    {
+        return 0;
+    }
+}
+
+float3 W_spiky_gradient(float3 R, float h)
+{
+    float r = length(R);
+    
+    // necessary!!!!!!!
+    // return 0 when Position[i] == Position[j], otherwise dividing zero causes NaN !!!
+    if (r == 0)
+    {
+        return 0;
+    }
+    
+    if (r <= h)
+    {
+        float h3 = h * h * h;
+        float h6 = h3 * h3;
+        float h_r = (h - r);
+        return -45.0 / (PI * h6) * h_r * h_r * (R / r);
+    }
+    else
+    {
+        return 0;
+    }
+}
+
+float W_viscosity(float R, float h)
+{
+    float r = length(R);
+    if (r <= h)
+    {
+        float h2 = h * h;
+        float h3 = h2 * h;
+        float r2 = r * r;
+        float r3 = r2 * r;
+        return 15.0 / (2 * PI * h3) * (-r3 / (2 * h3) + r2 / h2 + h / (2 * r) - 1);
+    }
+    else
+    {
+        return 0;
+    }
+}
+
+float W_viscosity_laplacian(float R, float h)
+{
+    float r = length(R);
+    if (r <= h)
+    {
+        float h2 = h * h;
+        float h3 = h2 * h;
+        float h5 = h3 * h2;
+        return 45.0 / (PI * h5) * (1 - r / h);
+    }
+    else
+    {
+        return 0;
+    }
+}
+
+
+
+
+/*
+https://github.com/littlemine/3x3_SVD_CUDA/blob/master/svd3x3/svd3x3/svd3_cuda.h
+*/
+
+#define gone					1065353216
+#define gsine_pi_over_eight		1053028117
+#define gcosine_pi_over_eight   1064076127
+#define gone_half				0.5f
+#define gsmall_number			1.e-12f
+#define gtiny_number			1.e-20f
+#define gfour_gamma_squared		5.8284273147583007813f
+
+
+void svd(
+	float a11, float a12, float a13, float a21, float a22, float a23, float a31, float a32, float a33, // input A     
+    inout float u11, inout float u12, inout float u13, inout float u21, inout float u22, inout float u23, inout float u31, inout float u32, inout float u33, // output U      
+	inout float s11,
+	//float &s12, float &s13, float &s21, 
+	inout float s22,
+	//float &s23, float &s31, float &s32, 
+	inout float s33, // output S
+	inout float v11, inout float v12, inout float v13, inout float v21, inout float v22, inout float v23, inout float v31, inout float v32, inout float v33 // output V
+)
+{
+    float Sa11, Sa21, Sa31, Sa12, Sa22, Sa32, Sa13, Sa23, Sa33;
+    float Su11, Su21, Su31, Su12, Su22, Su32, Su13, Su23, Su33;
+    float Sv11, Sv21, Sv31, Sv12, Sv22, Sv32, Sv13, Sv23, Sv33;
+    float Sc, Ss, Sch, Ssh;
+    float Stmp1, Stmp2, Stmp3, Stmp4, Stmp5;
+    float Ss11, Ss21, Ss31, Ss22, Ss32, Ss33;
+    float Sqvs, Sqvvx, Sqvvy, Sqvvz;
+    
+
+    Sa11 = a11;
+    Sa12 = a12;
+    Sa13 = a13;
+    Sa21 = a21;
+    Sa22 = a22;
+    Sa23 = a23;
+    Sa31 = a31;
+    Sa32 = a32;
+    Sa33 = a33;
+    
+
+	//###########################################################
+	// Compute normal equations matrix
+	//###########################################################
+
+    Ss11 = Sa11 * Sa11;
+    Stmp1 = Sa21 * Sa21;
+    Ss11 = Stmp1 + Ss11;
+    Stmp1 = Sa31 * Sa31;
+    Ss11 = Stmp1 + Ss11;
+
+    Ss21 = Sa12 * Sa11;
+    Stmp1 = Sa22 * Sa21;
+    Ss21 = Stmp1 + Ss21;
+    Stmp1 = Sa32 * Sa31;
+    Ss21 = Stmp1 + Ss21;
+
+    Ss31 = Sa13 * Sa11;
+    Stmp1 = Sa23 * Sa21;
+    Ss31 = Stmp1 + Ss31;
+    Stmp1 = Sa33 * Sa31;
+    Ss31 = Stmp1 + Ss31;
+
+    Ss22 = Sa12 * Sa12;
+    Stmp1 = Sa22 * Sa22;
+    Ss22 = Stmp1 + Ss22;
+    Stmp1 = Sa32 * Sa32;
+    Ss22 = Stmp1 + Ss22;
+
+    Ss32 = Sa13 * Sa12;
+    Stmp1 = Sa23 * Sa22;
+    Ss32 = Stmp1 + Ss32;
+    Stmp1 = Sa33 * Sa32;
+    Ss32 = Stmp1 + Ss32;
+
+    Ss33 = Sa13 * Sa13;
+    Stmp1 = Sa23 * Sa23;
+    Ss33 = Stmp1 + Ss33;
+    Stmp1 = Sa33 * Sa33;
+    Ss33 = Stmp1 + Ss33;
+
+    Sqvs = 1;
+    Sqvvx = 0;
+    Sqvvy = 0;
+    Sqvvz = 0;
+
+	//###########################################################
+	// Solve symmetric eigenproblem using Jacobi iteration
+	//###########################################################
+    for (int i = 0; i < 4; i++)
+    {
+        Ssh = Ss21 * 0.5f;
+        Stmp5 = Ss11 - Ss22;
+		
+        Stmp2 = Ssh * Ssh;
+        Stmp1 = asfloat((Stmp2 >= gtiny_number) ? 0xffffffff : 0);
+        Ssh = asfloat(asuint(Stmp1) & asuint(Ssh));
+        Sch = asfloat(asuint(Stmp1) & asuint(Stmp5));
+        Stmp2 = asfloat(~asuint(Stmp1) & gone);
+        Sch = asfloat(asuint(Sch) | asuint(Stmp2));
+		
+        Stmp1 = Ssh * Ssh;
+        Stmp2 = Sch * Sch;
+        Stmp3 = Stmp1 + Stmp2;
+        Stmp4 = rsqrt(Stmp3);
+		
+        Ssh = Stmp4 * Ssh;
+        Sch = Stmp4 * Sch;
+        Stmp1 = gfour_gamma_squared * Stmp1;
+        Stmp1 = asfloat((Stmp2 <= Stmp1) ? 0xffffffff : 0);
+		
+        Stmp2 = asfloat(gsine_pi_over_eight & asuint(Stmp1));
+        Ssh = asfloat(~asuint(Stmp1) & asuint(Ssh));
+        Ssh = asfloat(asuint(Ssh) | asuint(Stmp2));
+        Stmp2 = asfloat(gcosine_pi_over_eight & asuint(Stmp1));
+        Sch = asfloat(~asuint(Stmp1) & asuint(Sch));
+        Sch = asfloat(asuint(Sch) | asuint(Stmp2));
+		
+        Stmp1 = Ssh * Ssh;
+        Stmp2 = Sch * Sch;
+        Sc = Stmp2 - Stmp1;
+        Ss = Sch * Ssh;
+        Ss = Ss + Ss;
+
+		//###########################################################
+		// Perform the actual Givens conjugation
+		//###########################################################
+
+        Stmp3 = Stmp1 + Stmp2;
+        Ss33 = Ss33 * Stmp3;
+        Ss31 = Ss31 * Stmp3;
+        Ss32 = Ss32 * Stmp3;
+        Ss33 = Ss33 * Stmp3;
+
+        Stmp1 = Ss * Ss31;
+        Stmp2 = Ss * Ss32;
+        Ss31 = Sc * Ss31;
+        Ss32 = Sc * Ss32;
+        Ss31 = Stmp2 + Ss31;
+        Ss32 = Ss32 - Stmp1;
+		
+        Stmp2 = Ss * Ss;
+        Stmp1 = Ss22 * Stmp2;
+        Stmp3 = Ss11 * Stmp2;
+        Stmp4 = Sc * Sc;
+        Ss11 = Ss11 * Stmp4;
+        Ss22 = Ss22 * Stmp4;
+        Ss11 = Ss11 + Stmp1;
+        Ss22 = Ss22 + Stmp3;
+        Stmp4 = Stmp4 - Stmp2;
+        Stmp2 = Ss21 + Ss21;
+        Ss21 = Ss21 * Stmp4;
+        Stmp4 = Sc * Ss;
+        Stmp2 = Stmp2 * Stmp4;
+        Stmp5 = Stmp5 * Stmp4;
+        Ss11 = Ss11 + Stmp2;
+        Ss21 = Ss21 - Stmp5;
+        Ss22 = Ss22 - Stmp2;
+
+
+		//###########################################################
+		// Compute the cumulative rotation, in quaternion form
+		//###########################################################
+
+        Stmp1 = Ssh * Sqvvx;
+        Stmp2 = Ssh * Sqvvy;
+        Stmp3 = Ssh * Sqvvz;
+        Ssh = Ssh * Sqvs;
+
+        Sqvs = Sch * Sqvs;
+        Sqvvx = Sch * Sqvvx;
+        Sqvvy = Sch * Sqvvy;
+        Sqvvz = Sch * Sqvvz;
+
+        Sqvvz = Sqvvz + Ssh;
+        Sqvs = Sqvs - Stmp3;
+        Sqvvx = Sqvvx + Stmp2;
+        Sqvvy = Sqvvy - Stmp1;
+
+		//////////////////////////////////////////////////////////////////////////
+		// (1->3)
+		//////////////////////////////////////////////////////////////////////////
+        Ssh = Ss32 * 0.5f;
+        Stmp5 = Ss22 - Ss33;
+		
+        Stmp2 = Ssh * Ssh;
+        Stmp1 = asfloat((Stmp2 >= gtiny_number) ? 0xffffffff : 0);
+        Ssh = asfloat(asuint(Stmp1) & asuint(Ssh));
+        Sch = asfloat(asuint(Stmp1) & asuint(Stmp5));
+        Stmp2 = asfloat(~asuint(Stmp1) & gone);
+        Sch = asfloat(asuint(Sch) | asuint(Stmp2));
+		
+        Stmp1 = Ssh * Ssh;
+        Stmp2 = Sch * Sch;
+        Stmp3 = Stmp1 + Stmp2;
+        Stmp4 = rsqrt(Stmp3);
+		
+        Ssh = Stmp4 * Ssh;
+        Sch = Stmp4 * Sch;
+        Stmp1 = gfour_gamma_squared * Stmp1;
+        Stmp1 = asfloat((Stmp2 <= Stmp1) ? 0xffffffff : 0);
+		
+        Stmp2 = asfloat(gsine_pi_over_eight & asuint(Stmp1));
+        Ssh = asfloat(~asuint(Stmp1) & asuint(Ssh));
+        Ssh = asfloat(asuint(Ssh) | asuint(Stmp2));
+        Stmp2 = asfloat(gcosine_pi_over_eight & asuint(Stmp1));
+        Sch = asfloat(~asuint(Stmp1) & asuint(Sch));
+        Sch = asfloat(asuint(Sch) | asuint(Stmp2));
+		
+        Stmp1 = Ssh * Ssh;
+        Stmp2 = Sch * Sch;
+        Sc = Stmp2 - Stmp1;
+        Ss = Sch * Ssh;
+        Ss = Ss + Ss;
+
+
+		//###########################################################
+		// Perform the actual Givens conjugation
+		//###########################################################
+
+        Stmp3 = Stmp1 + Stmp2;
+        Ss11 = Ss11 * Stmp3;
+        Ss21 = Ss21 * Stmp3;
+        Ss31 = Ss31 * Stmp3;
+        Ss11 = Ss11 * Stmp3;
+		
+        Stmp1 = Ss * Ss21;
+        Stmp2 = Ss * Ss31;
+        Ss21 = Sc * Ss21;
+        Ss31 = Sc * Ss31;
+        Ss21 = Stmp2 + Ss21;
+        Ss31 = Ss31 - Stmp1;
+		
+        Stmp2 = Ss * Ss;
+        Stmp1 = Ss33 * Stmp2;
+        Stmp3 = Ss22 * Stmp2;
+        Stmp4 = Sc * Sc;
+        Ss22 = Ss22 * Stmp4;
+        Ss33 = Ss33 * Stmp4;
+        Ss22 = Ss22 + Stmp1;
+        Ss33 = Ss33 + Stmp3;
+        Stmp4 = Stmp4 - Stmp2;
+        Stmp2 = Ss32 + Ss32;
+        Ss32 = Ss32 * Stmp4;
+        Stmp4 = Sc * Ss;
+        Stmp2 = Stmp2 * Stmp4;
+        Stmp5 = Stmp5 * Stmp4;
+        Ss22 = Ss22 + Stmp2;
+        Ss32 = Ss32 - Stmp5;
+        Ss33 = Ss33 - Stmp2;
+
+
+		//###########################################################
+		// Compute the cumulative rotation, in quaternion form
+		//###########################################################
+
+        Stmp1 = Ssh * Sqvvx;
+        Stmp2 = Ssh * Sqvvy;
+        Stmp3 = Ssh * Sqvvz;
+        Ssh = Ssh * Sqvs;
+
+        Sqvs = Sch * Sqvs;
+        Sqvvx = Sch * Sqvvx;
+        Sqvvy = Sch * Sqvvy;
+        Sqvvz = Sch * Sqvvz;
+
+        Sqvvx = Sqvvx + Ssh;
+        Sqvs = Sqvs - Stmp1;
+        Sqvvy = Sqvvy + Stmp3;
+        Sqvvz = Sqvvz - Stmp2;
+
+#if 1
+		//////////////////////////////////////////////////////////////////////////
+		// 1 -> 2
+		//////////////////////////////////////////////////////////////////////////
+
+        Ssh = Ss31 * 0.5f;
+        Stmp5 = Ss33 - Ss11;
+		
+        Stmp2 = Ssh * Ssh;
+        Stmp1 = asfloat((Stmp2 >= gtiny_number) ? 0xffffffff : 0);
+        Ssh = asfloat(asuint(Stmp1) & asuint(Ssh));
+        Sch = asfloat(asuint(Stmp1) & asuint(Stmp5));
+        Stmp2 = asfloat(~asuint(Stmp1) & gone);
+        Sch = asfloat(asuint(Sch) | asuint(Stmp2));
+		
+        Stmp1 = Ssh * Ssh;
+        Stmp2 = Sch * Sch;
+        Stmp3 = Stmp1 + Stmp2;
+        Stmp4 = rsqrt(Stmp3);
+		
+        Ssh = Stmp4 * Ssh;
+        Sch = Stmp4 * Sch;
+        Stmp1 = gfour_gamma_squared * Stmp1;
+        Stmp1 = asfloat((Stmp2 <= Stmp1) ? 0xffffffff : 0);
+		
+        Stmp2 = asfloat(gsine_pi_over_eight & asuint(Stmp1));
+        Ssh = asfloat(~asuint(Stmp1) & asuint(Ssh));
+        Ssh = asfloat(asuint(Ssh) | asuint(Stmp2));
+        Stmp2 = asfloat(gcosine_pi_over_eight & asuint(Stmp1));
+        Sch = asfloat(~asuint(Stmp1) & asuint(Sch));
+        Sch = asfloat(asuint(Sch) | asuint(Stmp2));
+		
+        Stmp1 = Ssh * Ssh;
+        Stmp2 = Sch * Sch;
+        Sc = Stmp2 - Stmp1;
+        Ss = Sch * Ssh;
+        Ss = Ss + Ss;
+
+		//###########################################################
+		// Perform the actual Givens conjugation
+		//###########################################################
+
+        Stmp3 = Stmp1 + Stmp2;
+        Ss22 = Ss22 * Stmp3;
+        Ss32 = Ss32 * Stmp3;
+        Ss21 = Ss21 * Stmp3;
+        Ss22 = Ss22 * Stmp3;
+		
+        Stmp1 = Ss * Ss32;
+        Stmp2 = Ss * Ss21;
+        Ss32 = Sc * Ss32;
+        Ss21 = Sc * Ss21;
+        Ss32 = Stmp2 + Ss32;
+        Ss21 = Ss21 - Stmp1;
+		
+        Stmp2 = Ss * Ss;
+        Stmp1 = Ss11 * Stmp2;
+        Stmp3 = Ss33 * Stmp2;
+        Stmp4 = Sc * Sc;
+        Ss33 = Ss33 * Stmp4;
+        Ss11 = Ss11 * Stmp4;
+        Ss33 = Ss33 + Stmp1;
+        Ss11 = Ss11 + Stmp3;
+        Stmp4 = Stmp4 - Stmp2;
+        Stmp2 = Ss31 + Ss31;
+        Ss31 = Ss31 * Stmp4;
+        Stmp4 = Sc * Ss;
+        Stmp2 = Stmp2 * Stmp4;
+        Stmp5 = Stmp5 * Stmp4;
+        Ss33 = Ss33 + Stmp2;
+        Ss31 = Ss31 - Stmp5;
+        Ss11 = Ss11 - Stmp2;
+
+		//###########################################################
+		// Compute the cumulative rotation, in quaternion form
+		//###########################################################
+
+        Stmp1 = Ssh * Sqvvx;
+        Stmp2 = Ssh * Sqvvy;
+        Stmp3 = Ssh * Sqvvz;
+        Ssh = Ssh * Sqvs;
+
+        Sqvs = Sch * Sqvs;
+        Sqvvx = Sch * Sqvvx;
+        Sqvvy = Sch * Sqvvy;
+        Sqvvz = Sch * Sqvvz;
+
+        Sqvvy = Sqvvy + Ssh;
+        Sqvs = Sqvs - Stmp2;
+        Sqvvz = Sqvvz + Stmp1;
+        Sqvvx = Sqvvx - Stmp3;
+#endif
+    }
+
+	//###########################################################
+	// Normalize quaternion for matrix V
+	//###########################################################
+
+    Stmp2 = Sqvs * Sqvs;
+    Stmp1 = Sqvvx * Sqvvx;
+    Stmp2 = Stmp1 + Stmp2;
+    Stmp1 = Sqvvy * Sqvvy;
+    Stmp2 = Stmp1 + Stmp2;
+    Stmp1 = Sqvvz * Sqvvz;
+    Stmp2 = Stmp1 + Stmp2;
+
+    Stmp1 = rsqrt(Stmp2);
+    Stmp4 = Stmp1 * 0.5f;
+    Stmp3 = Stmp1 * Stmp4;
+    Stmp3 = Stmp1 * Stmp3;
+    Stmp3 = Stmp2 * Stmp3;
+    Stmp1 = Stmp1 + Stmp4;
+    Stmp1 = Stmp1 - Stmp3;
+
+    Sqvs = Sqvs * Stmp1;
+    Sqvvx = Sqvvx * Stmp1;
+    Sqvvy = Sqvvy * Stmp1;
+    Sqvvz = Sqvvz * Stmp1;
+
+	//###########################################################
+	// Transform quaternion to matrix V
+	//###########################################################
+
+    Stmp1 = Sqvvx * Sqvvx;
+    Stmp2 = Sqvvy * Sqvvy;
+    Stmp3 = Sqvvz * Sqvvz;
+    Sv11 = Sqvs * Sqvs;
+    Sv22 = Sv11 - Stmp1;
+    Sv33 = Sv22 - Stmp2;
+    Sv33 = Sv33 + Stmp3;
+    Sv22 = Sv22 + Stmp2;
+    Sv22 = Sv22 - Stmp3;
+    Sv11 = Sv11 + Stmp1;
+    Sv11 = Sv11 - Stmp2;
+    Sv11 = Sv11 - Stmp3;
+    Stmp1 = Sqvvx + Sqvvx;
+    Stmp2 = Sqvvy + Sqvvy;
+    Stmp3 = Sqvvz + Sqvvz;
+    Sv32 = Sqvs * Stmp1;
+    Sv13 = Sqvs * Stmp2;
+    Sv21 = Sqvs * Stmp3;
+    Stmp1 = Sqvvy * Stmp1;
+    Stmp2 = Sqvvz * Stmp2;
+    Stmp3 = Sqvvx * Stmp3;
+    Sv12 = Stmp1 - Sv21;
+    Sv23 = Stmp2 - Sv32;
+    Sv31 = Stmp3 - Sv13;
+    Sv21 = Stmp1 + Sv21;
+    Sv32 = Stmp2 + Sv32;
+    Sv13 = Stmp3 + Sv13;
+
+	///###########################################################
+	// Multiply (from the right) with V
+	//###########################################################
+
+    Stmp2 = Sa12;
+    Stmp3 = Sa13;
+    Sa12 = Sv12 * Sa11;
+    Sa13 = Sv13 * Sa11;
+    Sa11 = Sv11 * Sa11;
+    Stmp1 = Sv21 * Stmp2;
+    Sa11 = Sa11 + Stmp1;
+    Stmp1 = Sv31 * Stmp3;
+    Sa11 = Sa11 + Stmp1;
+    Stmp1 = Sv22 * Stmp2;
+    Sa12 = Sa12 + Stmp1;
+    Stmp1 = Sv32 * Stmp3;
+    Sa12 = Sa12 + Stmp1;
+    Stmp1 = Sv23 * Stmp2;
+    Sa13 = Sa13 + Stmp1;
+    Stmp1 = Sv33 * Stmp3;
+    Sa13 = Sa13 + Stmp1;
+
+    Stmp2 = Sa22;
+    Stmp3 = Sa23;
+    Sa22 = Sv12 * Sa21;
+    Sa23 = Sv13 * Sa21;
+    Sa21 = Sv11 * Sa21;
+    Stmp1 = Sv21 * Stmp2;
+    Sa21 = Sa21 + Stmp1;
+    Stmp1 = Sv31 * Stmp3;
+    Sa21 = Sa21 + Stmp1;
+    Stmp1 = Sv22 * Stmp2;
+    Sa22 = Sa22 + Stmp1;
+    Stmp1 = Sv32 * Stmp3;
+    Sa22 = Sa22 + Stmp1;
+    Stmp1 = Sv23 * Stmp2;
+    Sa23 = Sa23 + Stmp1;
+    Stmp1 = Sv33 * Stmp3;
+    Sa23 = Sa23 + Stmp1;
+
+    Stmp2 = Sa32;
+    Stmp3 = Sa33;
+    Sa32 = Sv12 * Sa31;
+    Sa33 = Sv13 * Sa31;
+    Sa31 = Sv11 * Sa31;
+    Stmp1 = Sv21 * Stmp2;
+    Sa31 = Sa31 + Stmp1;
+    Stmp1 = Sv31 * Stmp3;
+    Sa31 = Sa31 + Stmp1;
+    Stmp1 = Sv22 * Stmp2;
+    Sa32 = Sa32 + Stmp1;
+    Stmp1 = Sv32 * Stmp3;
+    Sa32 = Sa32 + Stmp1;
+    Stmp1 = Sv23 * Stmp2;
+    Sa33 = Sa33 + Stmp1;
+    Stmp1 = Sv33 * Stmp3;
+    Sa33 = Sa33 + Stmp1;
+
+	//###########################################################
+	// Permute columns such that the singular values are sorted
+	//###########################################################
+
+    Stmp1 = Sa11 * Sa11;
+    Stmp4 = Sa21 * Sa21;
+    Stmp1 = Stmp1 + Stmp4;
+    Stmp4 = Sa31 * Sa31;
+    Stmp1 = Stmp1 + Stmp4;
+
+    Stmp2 = Sa12 * Sa12;
+    Stmp4 = Sa22 * Sa22;
+    Stmp2 = Stmp2 + Stmp4;
+    Stmp4 = Sa32 * Sa32;
+    Stmp2 = Stmp2 + Stmp4;
+
+    Stmp3 = Sa13 * Sa13;
+    Stmp4 = Sa23 * Sa23;
+    Stmp3 = Stmp3 + Stmp4;
+    Stmp4 = Sa33 * Sa33;
+    Stmp3 = Stmp3 + Stmp4;
+
+	// Swap columns 1-2 if necessary
+
+    Stmp4 = asfloat((Stmp1 < Stmp2) ? 0xffffffff : 0);
+    Stmp5 = asfloat(asuint(Sa11) ^ asuint(Sa12));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sa11 = asfloat(asuint(Sa11) ^ asuint(Stmp5));
+    Sa12 = asfloat(asuint(Sa12) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Sa21) ^ asuint(Sa22));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sa21 = asfloat(asuint(Sa21) ^ asuint(Stmp5));
+    Sa22 = asfloat(asuint(Sa22) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Sa31) ^ asuint(Sa32));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sa31 = asfloat(asuint(Sa31) ^ asuint(Stmp5));
+    Sa32 = asfloat(asuint(Sa32) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Sv11) ^ asuint(Sv12));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sv11 = asfloat(asuint(Sv11) ^ asuint(Stmp5));
+    Sv12 = asfloat(asuint(Sv12) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Sv21) ^ asuint(Sv22));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sv21 = asfloat(asuint(Sv21) ^ asuint(Stmp5));
+    Sv22 = asfloat(asuint(Sv22) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Sv31) ^ asuint(Sv32));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sv31 = asfloat(asuint(Sv31) ^ asuint(Stmp5));
+    Sv32 = asfloat(asuint(Sv32) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Stmp1) ^ asuint(Stmp2));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Stmp1 = asfloat(asuint(Stmp1) ^ asuint(Stmp5));
+    Stmp2 = asfloat(asuint(Stmp2) ^ asuint(Stmp5));
+
+	// If columns 1-2 have been swapped, negate 2nd column of A and V so that V is still a rotation
+
+    Stmp5 = -2;
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Stmp4 = 1;
+    Stmp4 = Stmp4 + Stmp5;
+
+    Sa12 = Sa12 * Stmp4;
+    Sa22 = Sa22 * Stmp4;
+    Sa32 = Sa32 * Stmp4;
+
+    Sv12 = Sv12 * Stmp4;
+    Sv22 = Sv22 * Stmp4;
+    Sv32 = Sv32 * Stmp4;
+
+	// Swap columns 1-3 if necessary
+
+    Stmp4 = asfloat((Stmp1 < Stmp3) ? 0xffffffff : 0);
+    Stmp5 = asfloat(asuint(Sa11) ^ asuint(Sa13));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sa11 = asfloat(asuint(Sa11) ^ asuint(Stmp5));
+    Sa13 = asfloat(asuint(Sa13) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Sa21) ^ asuint(Sa23));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sa21 = asfloat(asuint(Sa21) ^ asuint(Stmp5));
+    Sa23 = asfloat(asuint(Sa23) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Sa31) ^ asuint(Sa33));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sa31 = asfloat(asuint(Sa31) ^ asuint(Stmp5));
+    Sa33 = asfloat(asuint(Sa33) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Sv11) ^ asuint(Sv13));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sv11 = asfloat(asuint(Sv11) ^ asuint(Stmp5));
+    Sv13 = asfloat(asuint(Sv13) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Sv21) ^ asuint(Sv23));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sv21 = asfloat(asuint(Sv21) ^ asuint(Stmp5));
+    Sv23 = asfloat(asuint(Sv23) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Sv31) ^ asuint(Sv33));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sv31 = asfloat(asuint(Sv31) ^ asuint(Stmp5));
+    Sv33 = asfloat(asuint(Sv33) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Stmp1) ^ asuint(Stmp3));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Stmp1 = asfloat(asuint(Stmp1) ^ asuint(Stmp5));
+    Stmp3 = asfloat(asuint(Stmp3) ^ asuint(Stmp5));
+
+	// If columns 1-3 have been swapped, negate 1st column of A and V so that V is still a rotation
+
+    Stmp5 = -2;
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Stmp4 = 1;
+    Stmp4 = Stmp4 + Stmp5;
+
+    Sa11 = Sa11 * Stmp4;
+    Sa21 = Sa21 * Stmp4;
+    Sa31 = Sa31 * Stmp4;
+
+    Sv11 = Sv11 * Stmp4;
+    Sv21 = Sv21 * Stmp4;
+    Sv31 = Sv31 * Stmp4;
+
+	// Swap columns 2-3 if necessary
+
+    Stmp4 = asfloat((Stmp2 < Stmp3) ? 0xffffffff : 0);
+    Stmp5 = asfloat(asuint(Sa12) ^ asuint(Sa13));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sa12 = asfloat(asuint(Sa12) ^ asuint(Stmp5));
+    Sa13 = asfloat(asuint(Sa13) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Sa22) ^ asuint(Sa23));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sa22 = asfloat(asuint(Sa22) ^ asuint(Stmp5));
+    Sa23 = asfloat(asuint(Sa23) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Sa32) ^ asuint(Sa33));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sa32 = asfloat(asuint(Sa32) ^ asuint(Stmp5));
+    Sa33 = asfloat(asuint(Sa33) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Sv12) ^ asuint(Sv13));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sv12 = asfloat(asuint(Sv12) ^ asuint(Stmp5));
+    Sv13 = asfloat(asuint(Sv13) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Sv22) ^ asuint(Sv23));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sv22 = asfloat(asuint(Sv22) ^ asuint(Stmp5));
+    Sv23 = asfloat(asuint(Sv23) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Sv32) ^ asuint(Sv33));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Sv32 = asfloat(asuint(Sv32) ^ asuint(Stmp5));
+    Sv33 = asfloat(asuint(Sv33) ^ asuint(Stmp5));
+
+    Stmp5 = asfloat(asuint(Stmp2) ^ asuint(Stmp3));
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Stmp2 = asfloat(asuint(Stmp2) ^ asuint(Stmp5));
+    Stmp3 = asfloat(asuint(Stmp3) ^ asuint(Stmp5));
+
+	// If columns 2-3 have been swapped, negate 3rd column of A and V so that V is still a rotation
+
+    Stmp5 = -2;
+    Stmp5 = asfloat(asuint(Stmp5) & asuint(Stmp4));
+    Stmp4 = 1;
+    Stmp4 = Stmp4 + Stmp5;
+
+    Sa13 = Sa13 * Stmp4;
+    Sa23 = Sa23 * Stmp4;
+    Sa33 = Sa33 * Stmp4;
+
+    Sv13 = Sv13 * Stmp4;
+    Sv23 = Sv23 * Stmp4;
+    Sv33 = Sv33 * Stmp4;
+
+	//###########################################################
+	// Construct QR factorization of A*V (=U*D) using Givens rotations
+	//###########################################################
+
+    Su11 = 1;
+    Su12 = 0;
+    Su13 = 0;
+    Su21 = 0;
+    Su22 = 1;
+    Su23 = 0;
+    Su31 = 0;
+    Su32 = 0;
+    Su33 = 1;
+	
+    Ssh = Sa21 * Sa21;
+    Ssh = asfloat((Ssh >= gsmall_number) ? 0xffffffff : 0);
+    Ssh = asfloat(asuint(Ssh) & asuint(Sa21));
+
+    Stmp5 = 0;
+    Sch = Stmp5 - Sa11;
+    Sch = max(Sch, Sa11);
+    Sch = max(Sch, gsmall_number);
+    Stmp5 = asfloat((Sa11 >= Stmp5) ? 0xffffffff : 0);
+
+    Stmp1 = Sch * Sch;
+    Stmp2 = Ssh * Ssh;
+    Stmp2 = Stmp1 + Stmp2;
+    Stmp1 = rsqrt(Stmp2);
+
+    Stmp4 = Stmp1 * 0.5f;
+    Stmp3 = Stmp1 * Stmp4;
+    Stmp3 = Stmp1 * Stmp3;
+    Stmp3 = Stmp2 * Stmp3;
+    Stmp1 = Stmp1 + Stmp4;
+    Stmp1 = Stmp1 - Stmp3;
+    Stmp1 = Stmp1 * Stmp2;
+
+    Sch = Sch + Stmp1;
+
+    Stmp1 = asfloat(~asuint(Stmp5) & asuint(Ssh));
+    Stmp2 = asfloat(~asuint(Stmp5) & asuint(Sch));
+    Sch = asfloat(asuint(Stmp5) & asuint(Sch));
+    Ssh = asfloat(asuint(Stmp5) & asuint(Ssh));
+    Sch = asfloat(asuint(Sch) | asuint(Stmp1));
+    Ssh = asfloat(asuint(Ssh) | asuint(Stmp2));
+
+    Stmp1 = Sch * Sch;
+    Stmp2 = Ssh * Ssh;
+    Stmp2 = Stmp1 + Stmp2;
+    Stmp1 = rsqrt(Stmp2);
+
+    Stmp4 = Stmp1 * 0.5f;
+    Stmp3 = Stmp1 * Stmp4;
+    Stmp3 = Stmp1 * Stmp3;
+    Stmp3 = Stmp2 * Stmp3;
+    Stmp1 = Stmp1 + Stmp4;
+    Stmp1 = Stmp1 - Stmp3;
+
+    Sch = Sch * Stmp1;
+    Ssh = Ssh * Stmp1;
+
+    Sc = Sch * Sch;
+    Ss = Ssh * Ssh;
+    Sc = Sc - Ss;
+    Ss = Ssh * Sch;
+    Ss = Ss + Ss;
+
+	//###########################################################
+	// Rotate matrix A
+	//###########################################################
+
+    Stmp1 = Ss * Sa11;
+    Stmp2 = Ss * Sa21;
+    Sa11 = Sc * Sa11;
+    Sa21 = Sc * Sa21;
+    Sa11 = Sa11 + Stmp2;
+    Sa21 = Sa21 - Stmp1;
+
+    Stmp1 = Ss * Sa12;
+    Stmp2 = Ss * Sa22;
+    Sa12 = Sc * Sa12;
+    Sa22 = Sc * Sa22;
+    Sa12 = Sa12 + Stmp2;
+    Sa22 = Sa22 - Stmp1;
+
+    Stmp1 = Ss * Sa13;
+    Stmp2 = Ss * Sa23;
+    Sa13 = Sc * Sa13;
+    Sa23 = Sc * Sa23;
+    Sa13 = Sa13 + Stmp2;
+    Sa23 = Sa23 - Stmp1;
+
+	//###########################################################
+	// Update matrix U
+	//###########################################################
+
+    Stmp1 = Ss * Su11;
+    Stmp2 = Ss * Su12;
+    Su11 = Sc * Su11;
+    Su12 = Sc * Su12;
+    Su11 = Su11 + Stmp2;
+    Su12 = Su12 - Stmp1;
+
+    Stmp1 = Ss * Su21;
+    Stmp2 = Ss * Su22;
+    Su21 = Sc * Su21;
+    Su22 = Sc * Su22;
+    Su21 = Su21 + Stmp2;
+    Su22 = Su22 - Stmp1;
+
+    Stmp1 = Ss * Su31;
+    Stmp2 = Ss * Su32;
+    Su31 = Sc * Su31;
+    Su32 = Sc * Su32;
+    Su31 = Su31 + Stmp2;
+    Su32 = Su32 - Stmp1;
+
+	// Second Givens rotation
+
+    Ssh = Sa31 * Sa31;
+    Ssh = asfloat((Ssh >= gsmall_number) ? 0xffffffff : 0);
+    Ssh = asfloat(asuint(Ssh) & asuint(Sa31));
+
+    Stmp5 = 0;
+    Sch = Stmp5 - Sa11;
+    Sch = max(Sch, Sa11);
+    Sch = max(Sch, gsmall_number);
+    Stmp5 = asfloat((Sa11 >= Stmp5) ? 0xffffffff : 0);
+
+    Stmp1 = Sch * Sch;
+    Stmp2 = Ssh * Ssh;
+    Stmp2 = Stmp1 + Stmp2;
+    Stmp1 = rsqrt(Stmp2);
+
+    Stmp4 = Stmp1 * 0.5;
+    Stmp3 = Stmp1 * Stmp4;
+    Stmp3 = Stmp1 * Stmp3;
+    Stmp3 = Stmp2 * Stmp3;
+    Stmp1 = Stmp1 + Stmp4;
+    Stmp1 = Stmp1 - Stmp3;
+    Stmp1 = Stmp1 * Stmp2;
+
+    Sch = Sch + Stmp1;
+
+    Stmp1 = asfloat(~asuint(Stmp5) & asuint(Ssh));
+    Stmp2 = asfloat(~asuint(Stmp5) & asuint(Sch));
+    Sch = asfloat(asuint(Stmp5) & asuint(Sch));
+    Ssh = asfloat(asuint(Stmp5) & asuint(Ssh));
+    Sch = asfloat(asuint(Sch) | asuint(Stmp1));
+    Ssh = asfloat(asuint(Ssh) | asuint(Stmp2));
+
+    Stmp1 = Sch * Sch;
+    Stmp2 = Ssh * Ssh;
+    Stmp2 = Stmp1 + Stmp2;
+    Stmp1 = rsqrt(Stmp2);
+
+    Stmp4 = Stmp1 * 0.5f;
+    Stmp3 = Stmp1 * Stmp4;
+    Stmp3 = Stmp1 * Stmp3;
+    Stmp3 = Stmp2 * Stmp3;
+    Stmp1 = Stmp1 + Stmp4;
+    Stmp1 = Stmp1 - Stmp3;
+
+    Sch = Sch * Stmp1;
+    Ssh = Ssh * Stmp1;
+
+    Sc = Sch * Sch;
+    Ss = Ssh * Ssh;
+    Sc = Sc - Ss;
+    Ss = Ssh * Sch;
+    Ss = Ss + Ss;
+
+	//###########################################################
+	// Rotate matrix A
+	//###########################################################
+
+    Stmp1 = Ss * Sa11;
+    Stmp2 = Ss * Sa31;
+    Sa11 = Sc * Sa11;
+    Sa31 = Sc * Sa31;
+    Sa11 = Sa11 + Stmp2;
+    Sa31 = Sa31 - Stmp1;
+
+    Stmp1 = Ss * Sa12;
+    Stmp2 = Ss * Sa32;
+    Sa12 = Sc * Sa12;
+    Sa32 = Sc * Sa32;
+    Sa12 = Sa12 + Stmp2;
+    Sa32 = Sa32 - Stmp1;
+
+    Stmp1 = Ss * Sa13;
+    Stmp2 = Ss * Sa33;
+    Sa13 = Sc * Sa13;
+    Sa33 = Sc * Sa33;
+    Sa13 = Sa13 + Stmp2;
+    Sa33 = Sa33 - Stmp1;
+
+	//###########################################################
+	// Update matrix U
+	//###########################################################
+
+    Stmp1 = Ss * Su11;
+    Stmp2 = Ss * Su13;
+    Su11 = Sc * Su11;
+    Su13 = Sc * Su13;
+    Su11 = Su11 + Stmp2;
+    Su13 = Su13 - Stmp1;
+
+    Stmp1 = Ss * Su21;
+    Stmp2 = Ss * Su23;
+    Su21 = Sc * Su21;
+    Su23 = Sc * Su23;
+    Su21 = Su21 + Stmp2;
+    Su23 = Su23 - Stmp1;
+
+    Stmp1 = Ss * Su31;
+    Stmp2 = Ss * Su33;
+    Su31 = Sc * Su31;
+    Su33 = Sc * Su33;
+    Su31 = Su31 + Stmp2;
+    Su33 = Su33 - Stmp1;
+
+	// Third Givens Rotation
+
+    Ssh = Sa32 * Sa32;
+    Ssh = asfloat((Ssh >= gsmall_number) ? 0xffffffff : 0);
+    Ssh = asfloat(asuint(Ssh) & asuint(Sa32));
+
+    Stmp5 = 0;
+    Sch = Stmp5 - Sa22;
+    Sch = max(Sch, Sa22);
+    Sch = max(Sch, gsmall_number);
+    Stmp5 = asfloat((Sa22 >= Stmp5) ? 0xffffffff : 0);
+
+    Stmp1 = Sch * Sch;
+    Stmp2 = Ssh * Ssh;
+    Stmp2 = Stmp1 + Stmp2;
+    Stmp1 = rsqrt(Stmp2);
+
+    Stmp4 = Stmp1 * 0.5f;
+    Stmp3 = Stmp1 * Stmp4;
+    Stmp3 = Stmp1 * Stmp3;
+    Stmp3 = Stmp2 * Stmp3;
+    Stmp1 = Stmp1 + Stmp4;
+    Stmp1 = Stmp1 - Stmp3;
+    Stmp1 = Stmp1 * Stmp2;
+
+    Sch = Sch + Stmp1;
+
+    Stmp1 = asfloat(~asuint(Stmp5) & asuint(Ssh));
+    Stmp2 = asfloat(~asuint(Stmp5) & asuint(Sch));
+    Sch = asfloat(asuint(Stmp5) & asuint(Sch));
+    Ssh = asfloat(asuint(Stmp5) & asuint(Ssh));
+    Sch = asfloat(asuint(Sch) | asuint(Stmp1));
+    Ssh = asfloat(asuint(Ssh) | asuint(Stmp2));
+
+    Stmp1 = Sch * Sch;
+    Stmp2 = Ssh * Ssh;
+    Stmp2 = Stmp1 + Stmp2;
+    Stmp1 = rsqrt(Stmp2);
+
+    Stmp4 = Stmp1 * 0.5f;
+    Stmp3 = Stmp1 * Stmp4;
+    Stmp3 = Stmp1 * Stmp3;
+    Stmp3 = Stmp2 * Stmp3;
+    Stmp1 = Stmp1 + Stmp4;
+    Stmp1 = Stmp1 - Stmp3;
+
+    Sch = Sch * Stmp1;
+    Ssh = Ssh * Stmp1;
+
+    Sc = Sch * Sch;
+    Ss = Ssh * Ssh;
+    Sc = Sc - Ss;
+    Ss = Ssh * Sch;
+    Ss = Ss + Ss;
+
+	//###########################################################
+	// Rotate matrix A
+	//###########################################################
+
+    Stmp1 = Ss * Sa21;
+    Stmp2 = Ss * Sa31;
+    Sa21 = Sc * Sa21;
+    Sa31 = Sc * Sa31;
+    Sa21 = Sa21 + Stmp2;
+    Sa31 = Sa31 - Stmp1;
+
+    Stmp1 = Ss * Sa22;
+    Stmp2 = Ss * Sa32;
+    Sa22 = Sc * Sa22;
+    Sa32 = Sc * Sa32;
+    Sa22 = Sa22 + Stmp2;
+    Sa32 = Sa32 - Stmp1;
+
+    Stmp1 = Ss * Sa23;
+    Stmp2 = Ss * Sa33;
+    Sa23 = Sc * Sa23;
+    Sa33 = Sc * Sa33;
+    Sa23 = Sa23 + Stmp2;
+    Sa33 = Sa33 - Stmp1;
+
+	//###########################################################
+	// Update matrix U
+	//###########################################################
+
+    Stmp1 = Ss * Su12;
+    Stmp2 = Ss * Su13;
+    Su12 = Sc * Su12;
+    Su13 = Sc * Su13;
+    Su12 = Su12 + Stmp2;
+    Su13 = Su13 - Stmp1;
+
+    Stmp1 = Ss * Su22;
+    Stmp2 = Ss * Su23;
+    Su22 = Sc * Su22;
+    Su23 = Sc * Su23;
+    Su22 = Su22 + Stmp2;
+    Su23 = Su23 - Stmp1;
+
+    Stmp1 = Ss * Su32;
+    Stmp2 = Ss * Su33;
+    Su32 = Sc * Su32;
+    Su33 = Sc * Su33;
+    Su32 = Su32 + Stmp2;
+    Su33 = Su33 - Stmp1;
+
+    v11 = Sv11;
+    v12 = Sv12;
+    v13 = Sv13;
+    v21 = Sv21;
+    v22 = Sv22;
+    v23 = Sv23;
+    v31 = Sv31;
+    v32 = Sv32;
+    v33 = Sv33;
+
+    u11 = Su11;
+    u12 = Su12;
+    u13 = Su13;
+    u21 = Su21;
+    u22 = Su22;
+    u23 = Su23;
+    u31 = Su31;
+    u32 = Su32;
+    u33 = Su33;
+
+    s11 = Sa11;
+	//s12 = Sa12; s13 = Sa13; s21 = Sa21; 
+    s22 = Sa22;
+	//s23 = Sa23; s31 = Sa31; s32 = Sa32; 
+    s33 = Sa33;
+}
+
+void svd(float3x3 A, inout float3x3 U, inout float3x3 Sigma, inout float3x3 V)
+{
+    Sigma = 0;
+    svd(A[0][0], A[0][1], A[0][2], A[1][0], A[1][1], A[1][2], A[2][0], A[2][1], A[2][2],
+        U[0][0], U[0][1], U[0][2], U[1][0], U[1][1], U[1][2], U[2][0], U[2][1], U[2][2],
+        Sigma[0][0], Sigma[1][1], Sigma[2][2],
+        V[0][0], V[0][1], V[0][2], V[1][0], V[1][1], V[1][2], V[2][0], V[2][1], V[2][2]
+    );
+}
+
+// parameter A was passed by value or reference ? 
+void pseudo_inverse(float3x3 A, inout float3x3 A_inv)
+{
+    float3x3 U, Sigma, V;
+    svd(A, U, Sigma, V);
+    for (int i = 0; i < 3; ++i)
+    {
+        Sigma[i][i] = -Sigma[i][i];
+    }
+    A_inv = mul(V, mul(Sigma, transpose(U)));
+}
+
+
+void unit_test_transpose(
+float A11, float A12, float A13, float A21, float A22, float A23, float A31, float A32, float A33,
+inout float B11, inout float B12, inout float B13, inout float B21, inout float B22, inout float B23, inout float B31, inout float B32, inout float B33
+)
+{
+    B11 = A11;
+    B12 = A21;
+    B13 = A31;
+    B21 = A12;
+    B22 = A22;
+    B23 = A32;
+    B31 = A13;
+    B32 = A23;
+    B33 = A33;
+}
+
+void unit_test_inverse_inout_function_embedding(float3x3 A, inout float3x3 _A_inv)
+{
+    float3x3 A_inv;
+    unit_test_transpose(A[0][0], A[0][1], A[0][2], A[1][0], A[1][1], A[1][2], A[2][0], A[2][1], A[2][2],
+                        A_inv[0][0], A_inv[0][1], A_inv[0][2], A_inv[1][0], A_inv[1][1], A_inv[1][2], A_inv[2][0], A_inv[2][1], A_inv[2][2]);
+
+    _A_inv = A_inv;
+}

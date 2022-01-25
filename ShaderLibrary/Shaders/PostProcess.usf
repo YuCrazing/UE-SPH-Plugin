@@ -1,0 +1,18 @@
+#include "/Engine/Public/Platform.ush"
+
+Texture2D InputTexture;
+RWTexture2D<float4> OutputTexture;
+float2 TextureSize;
+
+[numthreads(THREADGROUPSIZE_X, THREADGROUPSIZE_Y, THREADGROUPSIZE_Z)]
+void MainCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    //float2 iResolution = float2(TextureSize.x, TextureSize.y);
+    //float2 uv = (ThreadId.xy / iResolution.xy) - 0.5;
+    //float2 TexCoordinate = ThreadId.xy;
+    if (ThreadId.x < 128 && ThreadId.y < 128)
+    {
+        OutputTexture[ThreadId.xy] = float4(1, 0, 0, 0);
+    }
+    
+ }

@@ -1,0 +1,658 @@
+#include "/Engine/Public/Platform.ush"
+#include "/ShaderLibrary/ParticleSystemCommon.ush"
+
+// https://docs.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-per-component-math
+// https://docs.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-appendix-pre-pragma-pack-matrix
+#pragma pack_matrix( colum_major ) // default
+
+
+// Simulation boundary
+float3 SimCenter;
+float3 SimHalfExtent;
+float3 SimExtent;
+float3 SimLowerCorner;
+float3 SimHigherCorner;
+	
+// Particle spawning
+float3 SpawnCenter;
+float3 SpawnHalfExtent;
+float3 SpawnExtent;
+float3 SpawnLowerCorner;
+float3 SpawnHigherCorner;
+float SpawnSpeed;
+int ParticleNum;
+int ActiveNum;
+int FluidParticleNum;
+int SolidParticleNum;
+/*
+    particle array layout:
+
+    |-- fluid partilces --|-- solid particles --|-- boundary particles --|
+    [0] ..... [FluidParticleNum] ...... [SolidParticleNum] ...... [ParticleNum]
+
+*/
+	
+// Physical quantities
+float3 g;
+float dt;
+float rho;
+
+// Debugging
+float SpeedScale;
+float PressureScale;
+float ViscosityScale;
+float Damping;
+float Gamma;
+int ClampDensity;
+int ClampPressure;
+int ClampVelocity;
+int ClampAcceleration;
+int Preset;
+float3 InitialVelocity;
+int Visualization;
+float Gamma1;
+float Gamma2;
+int UseNaiveBoundaryHandling;
+
+//SPH
+float m;
+float h;
+float ParticleSpacing;
+int ParticleNumPerLine;
+float YoungsModulus;
+float PoissonRatio;
+float mu;
+float lambda;
+float SolidParticleMass;
+float SolidParticleVolume;
+float SolidParticleDensity;
+float alpha;
+	
+// Buffers
+// Position.w: active or not
+RWStructuredBuffer<float4> Position;
+RWStructuredBuffer<float4> Velocity;
+
+RWBuffer<float> Mass;
+RWBuffer<float> Volume;
+RWBuffer<float> Density;
+RWBuffer<float> Pressure;
+RWStructuredBuffer<float4> Acceleration;
+StructuredBuffer<float4> RestPosition;
+
+//Solid
+RWStructuredBuffer<float4x4> J;
+// cached mul(Ri, Li)
+RWStructuredBuffer<float4x4> L;
+RWStructuredBuffer<float4x4> RL;
+
+// Unit test 
+int UnitTestPreset;
+int UnitTestNum;
+RWStructuredBuffer<float4x4> _A;
+RWStructuredBuffer<float4x4> _U;
+RWStructuredBuffer<float4x4> _Sigma;
+RWStructuredBuffer<float4x4> _V;
+
+
+
+[numthreads(THREADGROUPSIZE_X, THREADGROUPSIZE_Y, THREADGROUPSIZE_Z)]
+void ParticleSystemIntializationCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    int i = ThreadId.x;
+    if (i < ParticleNum)
+    {
+        if (Preset == -1)
+        {
+            float3 Rand = float3(rand_1_05(float2(1.0f * i / 100 + 1.0 / 13, 1.0f * i / 100 - 1.0 / 13)),
+                                rand_1_05(float2(1.0f * i / 100 + 2.0 / 13, 1.0f * i / 100 - 2.0 / 13)),
+                                rand_1_05(float2(1.0f * i / 100 + 3.0 / 13, 1.0f * i / 100 - 3.0 / 13)));
+        
+            // w represents active or not
+            Position[i] = float4(SpawnLowerCorner + SpawnExtent * Rand, 0);
+        
+            // NaN
+            //Velocity[i] = float4(pow(-1, i) * 1.0f, pow(-1, i+1) * 0.1f * i, 2.0f, 0.0f) * 0.01f;
+        }
+        else if (Preset == 0)
+        {
+            Velocity[i] = float4(rand_1_05(float2(1.0f * i / 100 + 1.0 / 10, 1.0f * i / 100 - 1.0 / 10)),
+                                rand_1_05(float2(1.0f * i / 100 + 2.0 / 10, 1.0f * i / 100 - 2.0 / 10)),
+                                rand_1_05(float2(1.0f * i / 100 + 3.0 / 10, 1.0f * i / 100 - 3.0 / 10)),
+                                0.0f) * SpeedScale;
+        }
+        else if (Preset == 1)
+        {
+            Velocity[i] = float4(rand_1_05(float2(1.0f * i / 100 + 1.0 / 10, 1.0f * i / 100 - 1.0 / 10)),
+                                    rand_1_05(float2(1.0f * i / 100 + 2.0 / 10, 1.0f * i / 100 - 2.0 / 10)) * 0.1,
+                                    0, 0) * SpeedScale;
+        }
+        else if(Preset == 2)
+        {
+            int N = ParticleNumPerLine;
+            Position[i].xyz = float3(i % N, i / N % N, i / N / N % N) * ParticleSpacing + SpawnLowerCorner;
+            Velocity[i] = float4(InitialVelocity, 0);
+            //int ParticleNumPerLine = 0;
+            //int ParticleLength = 0;
+            //for (int j = 0; j < ParticleNumPerLine; ++j)
+            //{
+            //    for (int k = 0; k < ParticleNumPerLine; ++k)
+            //    {
+            //        for (int l = 0; l < ParticleNumPerLine; ++l)
+            //        {
+            //            Position[i] = float4(j * ParticleLength, k * ParticleLength, l * ParticleLength, 0);
+            //        }
+
+            //    }
+            //}
+        }
+        else if (Preset == 3)
+        {
+            // Initialize position and velocity from CPU code
+        }
+        
+        Density[i] = 0;
+        Pressure[i] = 0;
+        Acceleration[i] = 0;
+        
+        
+        if (i >= FluidParticleNum)
+        {
+            Density[i] = rho;
+        }
+        
+    }
+}
+
+[numthreads(THREADGROUPSIZE_X, THREADGROUPSIZE_Y, THREADGROUPSIZE_Z)]
+void ParticleSystemSimulationCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    int i = ThreadId.x;
+    if (i < FluidParticleNum)
+    {
+        float3 acceleration = g;
+        Velocity[i] += float4(acceleration * dt, 0);
+        Position[i] += Velocity[i] * dt;
+        Position[i].w = 1;
+        
+        for (int j = 0; j < 3; ++j)
+        {
+            if (Position[i][j] < SimLowerCorner[j])
+            {
+                Position[i][j] = SimLowerCorner[j];
+                Velocity[i][j] = - Damping * Velocity[i][j];
+            }
+        }
+        
+        for (int j = 0; j < 3; ++j)
+        {
+            if (Position[i][j] > SimHigherCorner[j])
+            {
+                Position[i][j] = SimHigherCorner[j];
+                Velocity[i][j] = - Damping * Velocity[i][j];
+            }
+        }
+        
+    }
+}
+
+[numthreads(THREADGROUPSIZE_X, THREADGROUPSIZE_Y, THREADGROUPSIZE_Z)]
+void SPHDensityCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    int i = ThreadId.x;
+    if (i < FluidParticleNum)
+    {
+        float Wf = 0, Wb = 0;
+        for (int j = 0; j < FluidParticleNum; ++j)
+        {
+            float3 R = (Position[i] - Position[j]).xyz;
+            float W = W_poly6(R, h);
+            Wf += W;
+        }
+        
+        if (!UseNaiveBoundaryHandling)
+        {            
+            for (int j = SolidParticleNum; j < ParticleNum; ++j)
+            {
+                float3 R = (Position[i] - Position[j]).xyz;
+                float W = W_poly6(R, h);
+                Wb += W;
+            }
+        }
+        
+        //float V = m / rho;
+        //float Gamma1 = (1.0/V - Wf) / Wb;
+        
+        float density = m * (Wf + Gamma1 * Wb);
+        if (ClampDensity)
+        {
+            density = max(density, rho);
+        }
+        
+        
+        Density[i] = density;
+        
+        float k = PressureScale;
+        if (ClampPressure)
+        {
+            Pressure[i] = k * max(pow(density / rho, Gamma) - 1, 0);
+        }
+        else
+        {
+            Pressure[i] = k * (pow(density / rho, Gamma) - 1);
+        }
+    }
+}
+
+[numthreads(THREADGROUPSIZE_X, THREADGROUPSIZE_Y, THREADGROUPSIZE_Z)]
+void SPHPressureForceCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    int i = ThreadId.x;
+    if (i < FluidParticleNum)
+    {
+        float3 Acc = 0;
+        float Pi = Pressure[i];
+        float Rhoi = Density[i];
+        for (int j = 0; j < FluidParticleNum; ++j)
+        {
+            float Pj = Pressure[j];
+            float Rhoj = Density[j];
+            float3 R = (Position[i] - Position[j]).xyz;
+            Acc += -(Pi / (Rhoi * Rhoi) + Pj / (Rhoj * Rhoj)) * W_spiky_gradient(R, h);
+        }
+        if (!UseNaiveBoundaryHandling)
+        {
+            for (int j = SolidParticleNum; j < ParticleNum; ++j)
+            {
+                float Pj = Pressure[j];
+                float Rhoj = Density[j];
+                float3 R = (Position[i] - Position[j]).xyz;
+                Acc += -(2 * Pi * Gamma2 / (Rhoi * Rhoi)) * W_spiky_gradient(R, h);
+            }
+        }
+        Acc *= m;
+        Acceleration[i].xyz += Acc;
+    }
+}
+
+[numthreads(THREADGROUPSIZE_X, THREADGROUPSIZE_Y, THREADGROUPSIZE_Z)]
+void SPHViscosityForceCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    int i = ThreadId.x;
+    if (i < FluidParticleNum)
+    {
+        //float3 Force = 0;
+        float3 Acc = 0;
+        float Pi = Pressure[i];
+        float3 Vi = Velocity[i].xyz;
+        for (int j = 0; j < FluidParticleNum; ++j)
+        {
+            float Pj = Pressure[j];
+            float3 Vj = Velocity[j].xyz;
+            float Rhoj = Density[j];
+            float3 R = (Position[i] - Position[j]).xyz;
+            //Force += -(Vj - Vi) / Rhoj * W_viscosity_laplacian(R, h);
+            Acc += dot(Vi - Vj, R) / (length(R) + 0.01 * h * h) / Rhoj * W_spiky_gradient(R, h);
+
+        }
+        Acc *= m;
+        Acc *= ViscosityScale;
+        Acceleration[i].xyz += Acc;
+    }
+}
+
+[numthreads(THREADGROUPSIZE_X, THREADGROUPSIZE_Y, THREADGROUPSIZE_Z)]
+void SPHAdvanceCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    int i = ThreadId.x;
+    if (i < SolidParticleNum)
+    {
+        // debug
+        if (Visualization == 0)
+        {
+            Position[i].w = 1;
+        }
+        else if (Visualization == 1)
+        {
+            Position[i].w = Density[i];
+        }
+        else if (Visualization == 2)
+        {
+            Position[i].w = Pressure[i];
+        }
+        else if (Visualization == 3)
+        {
+            int Neighbour = 0;
+            for (int j = 0; j < FluidParticleNum; ++j)
+            {
+                float3 R = (Position[i] - Position[j]).xyz;
+                if (length(R) <= h)
+                {
+                    ++Neighbour;
+                }
+            }
+            Position[i].w = Neighbour;
+
+        }
+        else if (Visualization == 4)
+        {
+            Position[i].w = i;
+        }
+        //
+        
+        float3 acceleration = g + Acceleration[i].xyz;
+        
+        if (ClampAcceleration)
+        {
+            float k = 20000.0f;
+            if (length(Acceleration[i].xyz) >= k)
+            {
+                Acceleration[i] = normalize(Acceleration[i]) * k;
+            }
+        }
+        
+        //!!!!!!
+        Acceleration[i] = 0;
+        
+        
+        Velocity[i] += float4(acceleration * dt, 0);
+        
+        
+        if (ClampVelocity)
+        {
+            float k = ParticleSpacing / dt;
+            if (length(Velocity[i]) >= k)
+            {
+                Velocity[i] = normalize(Velocity[i]) * k;
+            }
+        }
+        
+        Position[i] += Velocity[i] * dt;
+        
+        
+        if (UseNaiveBoundaryHandling)
+        {
+            float3 CollisionNormal = 0;
+        
+            for (int j = 0; j < 3; ++j)
+            {
+                if (Position[i][j] < SimLowerCorner[j])
+                {
+                    Position[i][j] = SimLowerCorner[j];
+                    CollisionNormal[j] -= 1;
+
+                }
+            }
+        
+            for (int j = 0; j < 3; ++j)
+            {
+                if (Position[i][j] > SimHigherCorner[j])
+                {
+                    Position[i][j] = SimHigherCorner[j];
+                    CollisionNormal[j] += 1;
+                }
+            }
+        
+            float CollisionNormalLength = length(CollisionNormal);
+            if (CollisionNormalLength > EPS)
+            {
+                CollisionNormal /= CollisionNormalLength;
+                Velocity[i].xyz -= (1 + Damping) * dot(CollisionNormal, Velocity[i].xyz) * CollisionNormal;
+            
+            }
+        }
+        
+    }
+}
+
+float GetSolidParticleRestMass(int i)
+{
+    return SolidParticleMass;
+    //SolidParticleVolume * Density[i];
+}
+
+float GetSolidParticleRestVolume(int i)
+{
+    return Volume[i];
+}
+
+void float3x3Tofloat4x4(inout float3x3 A, inout float4x4 B)
+{
+    
+    for (int i = 0; i < 3; ++i)
+    {
+        B[i] = float4(A[i], 0);
+    }
+    B[3] = 0;
+}
+
+// 'static const' or just 'static' ?
+static const float3x3 I =
+{
+    1, 0, 0,
+    0, 1, 0,
+    0, 0, 1
+};
+
+float trace(float3x3 A)
+{
+    return A[0][0] + A[1][1] + A[2][2];
+}
+
+//void strain(float3x3 F, inout float3x3 Strain)
+//{
+//    Strain = 0.5f * (F + transpose(F)) - I;
+//}
+//void stress(float3x3 F, float3x3 Strain, inout float3x3 Stress)
+//{
+//    Stress = 2 * mu * Strain + lambda * trace(Strain) * I;
+//}
+
+float3x3 strain(float3x3 F)
+{
+    return 0.5f * (F + transpose(F)) - I;
+}
+float3x3 stress(float3x3 F)
+{
+    float3x3 Strain = strain(F);
+    return 2 * mu * Strain + lambda * trace(Strain) * I;
+}
+
+float3x3 outer_product(float3 a, float3 b)
+{
+    return mul((float3x1) a, (float1x3) b);
+    
+    // error
+    //return a * transpose(b);
+    
+    //float3x3 A, B;
+    //for (int i = 0; i < 3; ++i)
+    //{
+    //    A[i] = a;
+    //    B[i] = b;
+    //}
+    //return mul(transpose(A), B);
+}
+
+[numthreads(THREADGROUPSIZE_X, THREADGROUPSIZE_Y, THREADGROUPSIZE_Z)]
+void SPHSolidVolumeInitializationCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    int i = ThreadId.x + FluidParticleNum;
+    if (i < SolidParticleNum)
+    {
+        float3 Xi = RestPosition[i].xyz;
+        
+        float Densityi = 0;
+        for (int j = FluidParticleNum; j < SolidParticleNum; ++j)
+        {
+            float3 Xj = RestPosition[j].xyz;
+            float3 Xij = Xi - Xj;
+            Densityi += GetSolidParticleRestMass(i) * W_poly6(Xij, h);
+        }
+        
+        Volume[i] = GetSolidParticleRestMass(i) / Densityi;
+        
+    }
+
+}
+
+[numthreads(THREADGROUPSIZE_X, THREADGROUPSIZE_Y, THREADGROUPSIZE_Z)]
+void SPHSolidCorrectMatrixInitializationCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    int i = ThreadId.x + FluidParticleNum;
+    if (i < SolidParticleNum)
+    {
+        float3 Xi = RestPosition[i].xyz;
+        
+        float3x3 Li_ = 0, Li = 0;
+        for (int j = FluidParticleNum; j < SolidParticleNum; ++j)
+        {
+            float Vj0 = GetSolidParticleRestVolume(j);
+            float3 Xj = RestPosition[j].xyz;
+            float3 Xij = Xi - Xj;
+
+            Li_ += Vj0 * outer_product(W_spiky_gradient(Xij, h), Xij);
+        }
+        pseudo_inverse(Li_, Li);
+        
+        Li = I;
+        
+        float3x3Tofloat4x4(Li, L[i]);
+    }
+
+}
+
+// https://docs.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-per-component-math
+// A*B is elemnen-wise multiplicaiton
+// mul(A, B) is ordinary matrix multiplication
+[numthreads(THREADGROUPSIZE_X, THREADGROUPSIZE_Y, THREADGROUPSIZE_Z)]
+void SPHSolidDeformationGradientCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    int i = ThreadId.x + FluidParticleNum;
+    if (i < SolidParticleNum)
+    {
+        float3 xi = Position[i].xyz;
+        float3 Xi = RestPosition[i].xyz;
+        
+        float3x3 Li = L[i];
+        
+        float3x3 Ji = 0;
+        for (int j = FluidParticleNum; j < SolidParticleNum; ++j)
+        {
+            float Vj0 = GetSolidParticleRestVolume(j);
+            float3 xj = Position[j].xyz;
+            float3 xji = xj - xi;
+            float3 Xj = RestPosition[j].xyz;
+            float3 Xij = Xi - Xj;
+            float3 Xji = Xj - Xi;
+            Ji += Vj0 * outer_product(xji, mul(Li, W_spiky_gradient(Xij, h)));
+        }
+
+        
+        float3x3 U, Sigma, V, Ri;
+        svd(Ji, U, Sigma, V);
+        Ri = mul(U, transpose(V));
+        
+        
+        float3x3 RLi = mul(Ri, Li);
+        // cache this term
+        float3x3Tofloat4x4(RLi, RL[i]);
+        
+        
+        float3x3 Jstar = 0;
+        for (int j = FluidParticleNum; j < SolidParticleNum; ++j)
+        {
+            float Vj0 = GetSolidParticleRestVolume(j);
+            float3 xj = Position[j].xyz;
+            float3 xji = xj - xi;
+            float3 Xj = RestPosition[j].xyz;
+            float3 Xij = Xi - Xj;
+            float3 Xji = Xj - Xi;
+            // TODO: Can mul(Ri, mul(Li, W_spiky_gradient(Xij, h))) be cached? This term is also used in the next pass (calculating force).
+            Jstar += Vj0 * outer_product(xji - mul(Ri, Xji), mul(RLi, W_spiky_gradient(Xij, h)));
+
+        }
+        
+        Jstar += I;
+
+        float3x3Tofloat4x4(Jstar, J[i]);
+    }
+
+}
+
+[numthreads(THREADGROUPSIZE_X, THREADGROUPSIZE_Y, THREADGROUPSIZE_Z)]
+void SPHSolidForceCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    int i = ThreadId.x + FluidParticleNum;
+    if (i < SolidParticleNum)
+    {
+        float3 xi = Position[i].xyz;
+        float3 Xi = RestPosition[i].xyz;
+        float Vi0 = GetSolidParticleRestVolume(i);
+        float3x3 RLi = (float3x3)RL[i];
+        
+        float3 Fi = 0;
+        float3 F_HG_i = 0;
+        
+        for (int j = FluidParticleNum; j < SolidParticleNum; ++j)
+        {
+            float Vj0 = GetSolidParticleRestVolume(j);
+            float3 xj = Position[j].xyz;
+            float3 xij = xi - xj;
+            float3 xji = xj - xi;
+            float3 Xj = RestPosition[j].xyz;
+            float3 Xij = Xi - Xj;
+            float3 Xji = Xj - Xi;
+            float3x3 RLj = (float3x3)RL[j];
+
+            Fi += Vi0 * Vj0 * (mul(stress(J[i]), mul(RL[i], W_spiky_gradient(Xij, h))) - mul(stress(J[j]), mul(RL[j], W_spiky_gradient(Xji, h))));
+        
+            // Xij can not be zero, otherwise dividing zero happens
+            if (i != j)
+            {
+                float length_xij = max(length(xji), EPS);
+                float3 e_ji_i = mul(J[i], Xji) - xji;
+                float3 e_ij_j = mul(J[j], Xij) - xij;
+                F_HG_i += Vi0 * Vj0 * W_poly6(Xij, h) / dot(Xij, Xij) * (dot(e_ji_i, xji) / length_xij + dot(e_ij_j, xij) / length_xij) * xij / length_xij;
+            }
+            
+        }
+        F_HG_i *= -0.5 * alpha * YoungsModulus;
+        float3 Acc = (Fi + F_HG_i) / GetSolidParticleRestMass(i);
+        Acceleration[i].xyz += Acc;
+
+    }
+
+}
+
+// float4x4 can be implicitly converted to float3x3
+// BUT float3x3 can NOT be implicitly converted to float4x4
+[numthreads(THREADGROUPSIZE_X, THREADGROUPSIZE_Y, THREADGROUPSIZE_Z)]
+void UnitTestCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    int i = ThreadId.x;
+    if (i < UnitTestNum)
+    {
+        if (UnitTestPreset == 0)
+        {
+            float3x3 A = (float3x3) _A[i];
+            float3x3 U = 0;
+            float3x3 Sigma = 0;
+            float3x3 V = 0;
+            svd(A, U, Sigma, V);
+            float3x3Tofloat4x4(U, _U[i]);
+            float3x3Tofloat4x4(Sigma, _Sigma[i]);
+            float3x3Tofloat4x4(V, _V[i]);
+        }
+        else if (UnitTestPreset == 1)
+        {
+            float3x3 A = (float3x3) _A[i];
+            float3x3 A_inv;
+            unit_test_inverse_inout_function_embedding(A, A_inv);
+            float3x3Tofloat4x4(A_inv, _U[i]);
+            float3x3Tofloat4x4(A_inv, _Sigma[i]);
+            float3x3Tofloat4x4(A_inv, _V[i]);
+        }
+    }
+}
+
