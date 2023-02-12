@@ -1,5 +1,5 @@
 # UE-SPH-Plugin
-## Elatic body
+## Elastic body
 <img src="https://user-images.githubusercontent.com/8120108/218296613-de2c4918-21c8-4a1d-96ed-0b43893a7a09.gif" width="250" height="140"/>
 
 ## Fluid
